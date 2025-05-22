@@ -186,7 +186,7 @@ class DynamicNeuralNetwork:
         largest_intent_edge, intent_value = max(self.edge_growth_intents.items(), key=lambda x: abs(x[1]))
         from_node = largest_intent_edge[0]
         to_node = largest_intent_edge[1]
-        sign = 1 if intent_value > 0 else -1
+        sign = 1 if intent_value >= 0 else -1
         if self.G.get_node_utility(to_node) > 1:
             self.add_double_edge(from_node, to_node, sign)
         else:
