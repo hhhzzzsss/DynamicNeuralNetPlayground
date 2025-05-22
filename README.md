@@ -3,4 +3,4 @@
 
 Run `pip install .` to setup.
 
-Then run `python main.py` to run.
+Then run `python train.py` to run.
