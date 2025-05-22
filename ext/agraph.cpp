@@ -1,6 +1,8 @@
 #include <nanobind/nanobind.h>
 #include <nanobind/stl/vector.h>
 #include <nanobind/stl/pair.h>
+#include <nanobind/stl/tuple.h>
+#include <nanobind/ndarray.h>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -15,10 +17,30 @@ struct NodeData {
     NodeData(float h = 0.0f, float u = 0.0f) : hunger(h), utility(u) {}
 };
 
-template <typename WeightType = float>
+using WeightType = float;
+using NodeId = uint32_t;
+struct EdgeId {
+    uint64_t value;
+    
+    EdgeId(NodeId source, NodeId target) 
+        : value((static_cast<uint64_t>(source) << 32) | static_cast<uint64_t>(target)) {}
+
+    operator uint64_t() const { return value; }
+    
+    NodeId source() const { return static_cast<NodeId>(value >> 32); }
+    NodeId target() const { return static_cast<NodeId>(value & 0xFFFFFFFF); }
+    
+    bool operator==(const EdgeId& other) const { return value == other.value; }
+};
+template<>
+struct std::hash<EdgeId> {
+    std::size_t operator()(const EdgeId& id) const {
+        return std::hash<uint64_t>{}(id.value);
+    }
+};
+
 class AcyclicGraph {
 public:
-    using NodeId = int;
     struct Edge {
         NodeId nodeId;
         WeightType weight;
@@ -39,6 +61,7 @@ public:
         
         // Add to topological order
         topoOrder.push_back(id);
+        topoOrderIndices[id] = topoOrder.size() - 1;
         return id;
     }
     
@@ -63,126 +86,111 @@ public:
     }
     
     // Remove a node and all its connected edges
-    bool removeNode(NodeId id) {
-        if (nodes.find(id) == nodes.end()) return false;
-        
-        // Remove all associated edges
-        for (const Edge& edge : outEdges[id]) {
-            NodeId to = edge.nodeId;
-            auto& ins = inEdges[to];
-            ins.erase(std::remove(ins.begin(), ins.end(), id), ins.end());
+    void removeNode(NodeId id) {
+        // Check if the node exists
+        if (nodes.find(id) == nodes.end())
+            throw std::runtime_error("Node not found");
+            
+        // Remove all incoming edges to this node
+        for (const NodeId& source : inEdges[id]) {
+            auto& sourceOutEdges = outEdges[source];
+            sourceOutEdges.erase(std::remove(sourceOutEdges.begin(), sourceOutEdges.end(), id), sourceOutEdges.end());
+            edgeWeights.erase({source, id});
         }
-        
-        for (const Edge& edge : inEdges[id]) {
-            NodeId from = edge.nodeId;
-            auto& outs = outEdges[from];
-            outs.erase(std::remove(outs.begin(), outs.end(), id), outs.end());
+
+        // Remove all outgoing edges from this node
+        for (const NodeId& target : outEdges[id]) {
+            auto& targetInEdges = inEdges[target];
+            targetInEdges.erase(std::remove(targetInEdges.begin(), targetInEdges.end(), id), targetInEdges.end());
+            edgeWeights.erase({id, target});
         }
-        
-        // Remove node from all structures
+
+        // Remove node data structures
         nodes.erase(id);
-        outEdges.erase(id);
         inEdges.erase(id);
-        topoOrder.erase(std::remove(topoOrder.begin(), topoOrder.end(), id), topoOrder.end());
-        
-        return true;
+        outEdges.erase(id);
+
+        // Remove the node from the topological order
+        topoOrder.erase(topoOrder.begin() + topoOrderIndices[id]);
+
+        // Update the indices in the topological order
+        updateTopologicalIndices();
     }
     
     // Add edge with cycle detection and weight
-    bool addEdge(NodeId from, NodeId to, WeightType weight = 1.0) {
+    void addEdge(NodeId from, NodeId to, WeightType weight = 1.0) {
         // Validate nodes
         if (nodes.find(from) == nodes.end() || nodes.find(to) == nodes.end())
-            return false;
+            throw std::runtime_error("Node not found");
             
         // Check for self-loop
-        if (from == to) return false;
-        
-        // Check if edge already exists
-        auto it = std::find_if(outEdges[from].begin(), outEdges[from].end(),
-                             [to](const Edge& edge) { return edge.nodeId == to; });
+        if (from == to) 
+            throw std::runtime_error("Self-loops are not allowed");
                              
-        if (it != outEdges[from].end()) {
-            // Update weight if edge exists
-            it->weight = weight;
-            
-            // Also update the corresponding in-edge weight
-            auto inIt = std::find_if(inEdges[to].begin(), inEdges[to].end(),
-                                  [from](const Edge& edge) { return edge.nodeId == from; });
-            if (inIt != inEdges[to].end()) {
-                inIt->weight = weight;
-            }
-            return true;
+        // Check if edge already exists
+        if (edgeWeights.count({from, to})) {
+            throw std::runtime_error("Edge already exists");
         }
         
         // Check if adding this edge would create a cycle
         if (wouldCreateCycle(from, to))
-            return false;
+            return;
+            // throw std::runtime_error("Adding this edge would create a cycle");
         
         // Add edge with weight
-        outEdges[from].push_back(Edge(to, weight));
-        inEdges[to].push_back(Edge(from, weight));
+        outEdges[from].push_back(to);
+        inEdges[to].push_back(from);
+        edgeWeights[{from, to}] = weight;
         
         // Update topological ordering
         updateTopologicalOrder();
-        return true;
+        updateTopologicalIndices();
     }
     
     // Remove edge
-    bool removeEdge(NodeId from, NodeId to) {
-        if (outEdges.find(from) == outEdges.end())
-            return false;
-            
+    void removeEdge(NodeId from, NodeId to) {
+        // Check if nodes exist
+        if (nodes.find(from) == nodes.end() || nodes.find(to) == nodes.end())
+            throw std::runtime_error("Node not found");
+        
+        // Check if the edge exists
+        EdgeId edgeId(from, to);
+        if (!edgeWeights.count(edgeId))
+            throw std::runtime_error("Edge not found");
+        
+        // Remove edge from outEdges
         auto& outs = outEdges[from];
-        auto it = std::find_if(outs.begin(), outs.end(),
-                            [to](const Edge& edge) { return edge.nodeId == to; });
-                            
-        if (it == outs.end())
-            return false;
-            
-        // Remove the edge
-        outs.erase(it);
+        outs.erase(std::remove(outs.begin(), outs.end(), to), outs.end());
         
-        // Remove the corresponding in-edge
+        // Remove edge from inEdges
         auto& ins = inEdges[to];
-        ins.erase(std::find_if(ins.begin(), ins.end(),
-                            [from](const Edge& edge) { return edge.nodeId == from; }));
+        ins.erase(std::remove(ins.begin(), ins.end(), from), ins.end());
         
-        return true;
+        // Remove from edge weights
+        edgeWeights.erase(edgeId);
+        
+        // No need to update topological order since removing edges
+        // cannot create cycles or alter the valid ordering
     }
     
     // Get edge weight
     WeightType getEdgeWeight(NodeId from, NodeId to) const {
-        auto outIt = outEdges.find(from);
-        if (outIt != outEdges.end()) {
-            auto edgeIt = std::find_if(outIt->second.begin(), outIt->second.end(),
-                                    [to](const Edge& edge) { return edge.nodeId == to; });
-            if (edgeIt != outIt->second.end()) {
-                return edgeIt->weight;
-            }
-        }
-        throw std::runtime_error("Edge not found");
+        auto it = edgeWeights.find({from, to});
+        if (it != edgeWeights.end())
+            return it->second;
+        else
+            throw std::runtime_error("Edge not found");
     }
     
     // Set edge weight for existing edge
-    bool setEdgeWeight(NodeId from, NodeId to, WeightType weight) {
-        auto outIt = outEdges.find(from);
-        if (outIt != outEdges.end()) {
-            auto edgeIt = std::find_if(outIt->second.begin(), outIt->second.end(),
-                                    [to](const Edge& edge) { return edge.nodeId == to; });
-            if (edgeIt != outIt->second.end()) {
-                edgeIt->weight = weight;
-                
-                // Also update the corresponding in-edge
-                auto& ins = inEdges[to];
-                auto inEdgeIt = std::find_if(ins.begin(), ins.end(),
-                                         [from](const Edge& edge) { return edge.nodeId == from; });
-                if (inEdgeIt != ins.end()) {
-                    inEdgeIt->weight = weight;
-                }
-                return true;
-            }
-        }
-        return false;
+    void setEdgeWeight(NodeId from, NodeId to, WeightType weight) {
+        // Check if the edge exists
+        EdgeId edgeId(from, to);
+        if (!edgeWeights.count(edgeId))
+            throw std::runtime_error("Edge not found");
+
+        // Update the weight
+        edgeWeights[edgeId] = weight;
     }
     
     // Check if path exists between nodes
@@ -199,6 +207,49 @@ public:
         return topoOrder;
     }
     
+    // Get the index of a node in the topological order
+    size_t getTopologicalIndex(NodeId id) const {
+        auto it = topoOrderIndices.find(id);
+        if (it != topoOrderIndices.end()) {
+            return it->second;
+        } else {
+            throw std::runtime_error("Node not found in topological ordering");
+        }
+    }
+
+    // Get a vector of edges in order
+    std::vector<std::tuple<NodeId, NodeId, WeightType>> getSortedEdges() const {
+        std::vector<std::tuple<NodeId, NodeId, WeightType>> edges;
+        for (const NodeId& node : topoOrder) {
+            for (const NodeId& neighbor : inEdges.at(node)) {
+                auto it = edgeWeights.find({neighbor, node});
+                if (it != edgeWeights.end()) {
+                    edges.push_back(std::make_tuple(neighbor, node, it->second));
+                } else {
+                    throw std::runtime_error("Invalid agraph edge state");
+                }
+            }
+        }
+        return edges;
+    }
+
+    // Update the weights of the edges
+    void setEdgeWeights(const std::vector<std::tuple<NodeId, NodeId, WeightType>>& edges) {
+        for (const auto& edge : edges) {
+            NodeId from = std::get<0>(edge);
+            NodeId to = std::get<1>(edge);
+            WeightType weight = std::get<2>(edge);
+
+            EdgeId edgeId(from, to);
+            if (!edgeWeights.count(edgeId)) {
+                throw std::runtime_error("Edge not found: from=" + std::to_string(from) + " to=" + std::to_string(to));
+            }
+            
+            // Update the weight
+            edgeWeights[edgeId] = weight;
+        }
+    }
+
     // Get all nodes
     std::vector<NodeId> getNodes() const {
         std::vector<NodeId> nodeIds;
@@ -209,35 +260,45 @@ public:
     }
     
     // Get outgoing edges with weights for a node
-    std::vector<std::pair<NodeId, WeightType>> getOutEdges(NodeId id) const {
-        std::vector<std::pair<NodeId, WeightType>> result;
-        auto it = outEdges.find(id);
-        if (it != outEdges.end()) {
-            for (const Edge& edge : it->second) {
-                result.push_back({edge.nodeId, edge.weight});
-            }
-        }
+    std::vector<NodeId> getOutNeighbors(NodeId id) const {
+        std::vector<NodeId> result = outEdges.at(id);
         return result;
     }
     
     // Get incoming edges with weights for a node
-    std::vector<std::pair<NodeId, WeightType>> getInEdges(NodeId id) const {
-        std::vector<std::pair<NodeId, WeightType>> result;
-        auto it = inEdges.find(id);
-        if (it != inEdges.end()) {
-            for (const Edge& edge : it->second) {
-                result.push_back({edge.nodeId, edge.weight});
-            }
-        }
+    std::vector<NodeId> getInNeighbors(NodeId id) const {
+        std::vector<NodeId> result = inEdges.at(id);
         return result;
+    }
+
+    // Get out-degree of a node
+    size_t getOutDegree(NodeId id) const {
+        return outEdges.at(id).size();
+    }
+
+    // Get in-degree of a node
+    size_t getInDegree(NodeId id) const {
+        return inEdges.at(id).size();
+    }
+
+    // Get the number of nodes in the graph
+    size_t getNumNodes() const {
+        return nodes.size();
+    }
+
+    // Get the number of edges in the graph
+    size_t getNumEdges() const {
+        return edgeWeights.size();
     }
     
 private:
     NodeId nextNodeId = 0;
-    std::unordered_map<NodeId, NodeData> nodes;                  // Node storage
-    std::unordered_map<NodeId, std::vector<Edge>> outEdges;      // Forward edges with weights
-    std::unordered_map<NodeId, std::vector<Edge>> inEdges;       // Backward edges with weights
-    std::vector<NodeId> topoOrder;                               // Cached topological order
+    std::unordered_map<NodeId, NodeData> nodes;
+    std::unordered_map<NodeId, std::vector<NodeId>> outEdges;
+    std::unordered_map<NodeId, std::vector<NodeId>> inEdges;
+    std::unordered_map<EdgeId, WeightType> edgeWeights;
+    std::vector<NodeId> topoOrder;
+    std::unordered_map<NodeId, size_t> topoOrderIndices;
     
     // Cycle detection using DFS
     bool wouldCreateCycle(NodeId from, NodeId to) const {
@@ -253,8 +314,7 @@ private:
         
         const auto& neighbors = outEdges.find(current);
         if (neighbors != outEdges.end()) {
-            for (const Edge& edge : neighbors->second) {
-                NodeId next = edge.nodeId;
+            for (const NodeId& next : neighbors->second) {
                 if (visited.find(next) == visited.end()) {
                     if (hasPathDFS(next, target, visited))
                         return true;
@@ -274,8 +334,8 @@ private:
         }
         
         for (const auto& entry : outEdges) {
-            for (const Edge& edge : entry.second) {
-                inDegree[edge.nodeId]++;
+            for (const NodeId& targetNode : entry.second) {
+                inDegree[targetNode]++;
             }
         }
         
@@ -295,8 +355,7 @@ private:
             
             newOrder.push_back(current);
             
-            for (const Edge& edge : outEdges[current]) {
-                NodeId next = edge.nodeId;
+            for (const NodeId& next : outEdges[current]) {
                 inDegree[next]--;
                 if (inDegree[next] == 0) {
                     q.push(next);
@@ -305,6 +364,14 @@ private:
         }
         
         topoOrder = std::move(newOrder);
+    }
+
+    // Update indices for topological order
+    void updateTopologicalIndices() {
+        topoOrderIndices.clear();
+        for (size_t i = 0; i < topoOrder.size(); ++i) {
+            topoOrderIndices[topoOrder[i]] = i;
+        }
     }
 };
 
@@ -318,25 +385,32 @@ void bind_acyclic_graph(nb::module_& m) {
         .def_rw("utility", &NodeData::utility);
 
     // Bind AcyclicGraph class with fixed node type
-    nb::class_<AcyclicGraph<float>>(m, "AcyclicGraph")
+    nb::class_<AcyclicGraph>(m, "AcyclicGraph")
         .def(nb::init<>())
-        .def("add_node", &AcyclicGraph<float>::addNode, 
+        .def("add_node", &AcyclicGraph::addNode, 
              nb::arg("hunger") = 0.0f, nb::arg("utility") = 0.0f)
-        .def("get_node_hunger", &AcyclicGraph<float>::getNodeHunger)
-        .def("set_node_hunger", &AcyclicGraph<float>::setNodeHunger)
-        .def("get_node_utility", &AcyclicGraph<float>::getNodeUtility)
-        .def("set_node_utility", &AcyclicGraph<float>::setNodeUtility)
-        .def("remove_node", &AcyclicGraph<float>::removeNode)
-        .def("add_edge", &AcyclicGraph<float>::addEdge, 
+        .def("get_node_hunger", &AcyclicGraph::getNodeHunger)
+        .def("set_node_hunger", &AcyclicGraph::setNodeHunger)
+        .def("get_node_utility", &AcyclicGraph::getNodeUtility)
+        .def("set_node_utility", &AcyclicGraph::setNodeUtility)
+        .def("remove_node", &AcyclicGraph::removeNode)
+        .def("add_edge", &AcyclicGraph::addEdge, 
              nb::arg("from"), nb::arg("to"), nb::arg("weight") = 1.0f)
-        .def("remove_edge", &AcyclicGraph<float>::removeEdge)
-        .def("get_edge_weight", &AcyclicGraph<float>::getEdgeWeight)
-        .def("set_edge_weight", &AcyclicGraph<float>::setEdgeWeight)
-        .def("has_path", &AcyclicGraph<float>::hasPath)
-        .def("get_topological_order", &AcyclicGraph<float>::getTopologicalOrder)
-        .def("get_nodes", &AcyclicGraph<float>::getNodes)
-        .def("get_out_edges", &AcyclicGraph<float>::getOutEdges)
-        .def("get_in_edges", &AcyclicGraph<float>::getInEdges);
+        .def("remove_edge", &AcyclicGraph::removeEdge)
+        .def("get_edge_weight", &AcyclicGraph::getEdgeWeight)
+        .def("set_edge_weight", &AcyclicGraph::setEdgeWeight)
+        .def("has_path", &AcyclicGraph::hasPath)
+        .def("get_topological_order", &AcyclicGraph::getTopologicalOrder)
+        .def("get_topological_index", &AcyclicGraph::getTopologicalIndex)
+        .def("get_sorted_edges", &AcyclicGraph::getSortedEdges)
+        .def("set_edge_weights", &AcyclicGraph::setEdgeWeights)
+        .def("get_nodes", &AcyclicGraph::getNodes)
+        .def("get_out_neighbors", &AcyclicGraph::getOutNeighbors)
+        .def("get_in_neighbors", &AcyclicGraph::getInNeighbors)
+        .def("get_out_degree", &AcyclicGraph::getOutDegree)
+        .def("get_in_degree", &AcyclicGraph::getInDegree)
+        .def("get_num_nodes", &AcyclicGraph::getNumNodes)
+        .def("get_num_edges", &AcyclicGraph::getNumEdges);
 }
 
 NB_MODULE(agraph, m) {

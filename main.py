@@ -414,9 +414,10 @@ def main():
     # Get a batch from the trainloader and print it
     # limit = 20
     for batch_num, (inputs, labels) in enumerate(trainloader):
-        loss = predict_batch(inputs.reshape(32, -1), labels)
-        print(f"Batch {batch_num}, {loss=}")
-        draw_neural_network(G, ax)
+        print(inputs.shape, labels.shape)
+        # loss = predict_batch(inputs.reshape(32, -1), labels)
+        # print(f"Batch {batch_num}, {loss=}")
+        # draw_neural_network(G, ax)
 
         # limit -= 1
         # if limit <= 0:
