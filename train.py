@@ -23,10 +23,10 @@ def train_xor():
 
     # Train the model
     for batch in range(1000):
-        loss = dnn.train_batch(X_tensor, y_tensor, grow_edge=batch<10)
+        loss = dnn.train_batch(X_tensor, y_tensor, grow_edge=batch<20)
         print(f"Batch {batch}: Loss = {loss}")
         dnn.draw(plt, ax)
-        input()
+        # input()
 
 train_xor()
 

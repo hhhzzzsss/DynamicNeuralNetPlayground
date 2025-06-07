@@ -1,5 +1,6 @@
 #include <nanobind/nanobind.h>
 #include <nanobind/stl/vector.h>
+#include <nanobind/stl/unordered_set.h>
 #include <nanobind/stl/pair.h>
 #include <nanobind/stl/tuple.h>
 #include <nanobind/ndarray.h>
@@ -134,8 +135,7 @@ public:
         
         // Check if adding this edge would create a cycle
         if (wouldCreateCycle(from, to))
-            return;
-            // throw std::runtime_error("Adding this edge would create a cycle");
+            throw std::runtime_error("Adding this edge would create a cycle");
         
         // Add edge with weight
         outEdges[from].push_back(to);
@@ -271,6 +271,13 @@ public:
         return result;
     }
 
+    // Get all successors of a node
+    std::unordered_set<NodeId> getSuccessors(NodeId id) const {
+        std::unordered_set<NodeId> succs;
+        getSuccessorsInternal(id, succs);
+        return succs;
+    }
+
     // Get out-degree of a node
     size_t getOutDegree(NodeId id) const {
         return outEdges.at(id).size();
@@ -323,6 +330,14 @@ private:
         }
         
         return false;
+    }
+
+    // Get all successors of a node
+    void getSuccessorsInternal(NodeId id, std::unordered_set<NodeId>& succs) const {
+        for (const NodeId& succ : outEdges.at(id)) if (!succs.count(succ)) {
+            succs.insert(succ);
+            getSuccessorsInternal(succ, succs);
+        }
     }
     
     // Kahn's algorithm for topological sort
@@ -407,6 +422,7 @@ void bind_acyclic_graph(nb::module_& m) {
         .def("get_nodes", &AcyclicGraph::getNodes)
         .def("get_out_neighbors", &AcyclicGraph::getOutNeighbors)
         .def("get_in_neighbors", &AcyclicGraph::getInNeighbors)
+        .def("get_successors", &AcyclicGraph::getSuccessors)
         .def("get_out_degree", &AcyclicGraph::getOutDegree)
         .def("get_in_degree", &AcyclicGraph::getInDegree)
         .def("get_num_nodes", &AcyclicGraph::getNumNodes)

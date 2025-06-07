@@ -34,7 +34,7 @@ class DynamicNeuralNetwork:
         self.hidden_nodes.append(node_id)
         return node_id
     def add_edge(self, from_node, to_node, sign=0.0):
-        return self.G.add_edge(from_node, to_node, 0.001*sign)
+        self.G.add_edge(from_node, to_node, 0.001*sign)
     def add_double_edge(self, from_node, to_node, sign=0.0):
         hidden_node = self.add_hidden_node()
         self.G.add_edge(from_node, hidden_node, 1.0)
@@ -145,6 +145,8 @@ class DynamicNeuralNetwork:
         # Update hunger
         for node_id in self.hidden_nodes + self.output_nodes:
             current_hunger = self.G.get_node_hunger(node_id)
+            # print(f"{pth_nodes[self.G.get_topological_index(node_id)]}")
+            print(f"{node_id} -> {self.G.get_out_neighbors(node_id)}")
             current_hunger += torch.mean(torch.abs(
                 pth_nodes[self.G.get_topological_index(node_id)].grad
             ))
@@ -154,7 +156,6 @@ class DynamicNeuralNetwork:
         # Update edge weights
         if len(sorted_edges) > 0:
             weight_update = -edge_weights.grad * self.learning_rate
-            print(f"weight_update: {weight_update}")
             # for i, (_, to_node, _) in enumerate(sorted_edges):
             #     weight_update[i] /= (self.G.get_node_utility(to_node) + 1.0)
             self.G.set_edge_weights([
@@ -175,9 +176,9 @@ class DynamicNeuralNetwork:
         if max_hunger_node:
             in_neighbors = set(self.G.get_in_neighbors(max_hunger_node))
             out_neighbors = set(self.G.get_out_neighbors(max_hunger_node))
-            output_node_set = set(self.output_nodes)
+            successors = self.G.get_successors(max_hunger_node)
             all_nodes = set(self.G.get_nodes())
-            potential_in_neighbors = all_nodes - in_neighbors - out_neighbors - output_node_set - { max_hunger_node }
+            potential_in_neighbors = all_nodes - in_neighbors - out_neighbors - successors - self.output_nodes_set - { max_hunger_node }
         
         for potential_in_neighbor in potential_in_neighbors:
             edge_id = (potential_in_neighbor, max_hunger_node)
@@ -185,7 +186,7 @@ class DynamicNeuralNetwork:
                 self.edge_growth_intents.get(edge_id, 0) \
                 + torch.mean(pth_nodes[potential_in_neighbor] * pth_nodes[max_hunger_node].grad)
         
-        if grow_edge:
+        if grow_edge and len(self.edge_growth_intents) > 0:
             self.grow_edge()
 
         return loss.item()
@@ -196,8 +197,10 @@ class DynamicNeuralNetwork:
         to_node = largest_intent_edge[1]
         sign = 1 if intent_value >= 0 else -1
         if self.G.get_node_utility(to_node) > 1:
+            print(f"Growing double edge from {from_node} to {to_node}")
             self.add_double_edge(from_node, to_node, sign)
         else:
+            print(f"Growing single edge from {from_node} to {to_node}")
             self.add_edge(from_node, to_node, sign)
         self.edge_growth_intents.clear()
 
