@@ -3,7 +3,7 @@ import numpy as np
 from dnn_libs.agraph import AcyclicGraph
 
 class DynamicNeuralNetwork:
-    def __init__(self, input_size, output_size, utility_decay=0.01, hunger_decay=0.05, learning_rate=0.01):
+    def __init__(self, input_size, output_size, utility_decay=0.01, hunger_decay=0.05, learning_rate=1):
         self.input_size = input_size
         self.output_size = output_size
         self.utility_decay = utility_decay
@@ -22,6 +22,10 @@ class DynamicNeuralNetwork:
         for _ in range(output_size):
             node_id = self.G.add_node(hunger=0.0, utility=0.0)
             self.output_nodes.append(node_id)
+
+        self.input_nodes_set = set(self.input_nodes)
+        self.output_nodes_set = set(self.output_nodes)
+        self.hidden_nodes_set = set(self.hidden_nodes)
 
         self.edge_growth_intents = {}
 
@@ -69,26 +73,29 @@ class DynamicNeuralNetwork:
         for i in range(len(sorted_nodes)):
             if pth_nodes[i] is not None:
                 continue
-            node = sorted_nodes[i]
-            in_neighbors = self.G.get_in_neighbors(node)
+            node_id = sorted_nodes[i]
+            in_neighbors = self.G.get_in_neighbors(node_id)
             if len(in_neighbors) > 0:
                 incoming_products = torch.stack([
-                    pth_nodes[self.G.get_topological_index(in_n)] * edge_weights[edge_index_map[(in_n, node)]]
+                    pth_nodes[self.G.get_topological_index(in_n)] * edge_weights[edge_index_map[(in_n, node_id)]]
                     for in_n in in_neighbors
                 ])
-                pth_nodes[i] = torch.relu(torch.sum(incoming_products, dim=0))
+                pth_nodes[i] = torch.sum(incoming_products, dim=0)
+                if node_id not in self.output_nodes_set:
+                    pth_nodes[i] = torch.relu(pth_nodes[i])
                 pth_nodes[i].retain_grad()
             else:
                 pth_nodes[i] = torch.zeros(batch_size, dtype=torch.float32, requires_grad=True)
                 pth_nodes[i].retain_grad()
 
         output_tensor = torch.stack([
-            pth_nodes[self.G.get_topological_index(node)] for node in self.output_nodes
+            pth_nodes[self.G.get_topological_index(node_id)] for node_id in self.output_nodes
         ], dim=1)
         input_tensor = torch.stack([
-            pth_nodes[self.G.get_topological_index(node)] for node in self.input_nodes
+            pth_nodes[self.G.get_topological_index(node_id)] for node_id in self.input_nodes
         ], dim=1)
         print(input_tensor)
+        print(f"output tensor:\n{output_tensor}")
 
         # Compute loss
         criterion = torch.nn.CrossEntropyLoss()
@@ -101,7 +108,7 @@ class DynamicNeuralNetwork:
         ## to all of its predecessors weighted by the edge-weight times value of the predecessor
 
         # Initialize delta_utility for all nodes
-        delta_utility = {node: torch.zeros(batch_size, dtype=torch.float32) for node in sorted_nodes}
+        delta_utility = {node_id: torch.zeros(batch_size, dtype=torch.float32) for node_id in sorted_nodes}
 
         # Add 1/n to delta_utility for each output node
         for node_id in self.output_nodes:
@@ -116,21 +123,21 @@ class DynamicNeuralNetwork:
             self.G.set_node_utility(node_id, current_utility)
 
             # Propagate utility backwards
-            in_neighbors = self.G.get_in_neighbors(node)
+            in_neighbors = self.G.get_in_neighbors(node_id)
             # Get total weighted input for normalization
             total_weight_value = sum(
-                torch.abs(self.G.get_edge_weight(in_n, node) * pth_nodes[self.G.get_topological_index(in_n)])
+                torch.abs(self.G.get_edge_weight(in_n, node_id) * pth_nodes[self.G.get_topological_index(in_n)])
                 for in_n in in_neighbors
             )
             # Avoid division by zero
             total_weight_value += 1e-10
             # Distribute delta_utility
             for in_n in in_neighbors:
-                weight = self.G.get_edge_weight(in_n, node)
+                weight = self.G.get_edge_weight(in_n, node_id)
                 value = pth_nodes[self.G.get_topological_index(in_n)]
                 proportion = abs(weight * value) / total_weight_value
 
-                delta_utility[in_n] += current_utility * proportion
+                delta_utility[in_n] += delta_utility[node_id] * proportion
                 
         ## Hunger is computed as the absolute value of the partial derivative of the loss
         ## with respect to the node's value
@@ -146,9 +153,10 @@ class DynamicNeuralNetwork:
 
         # Update edge weights
         if len(sorted_edges) > 0:
-            weight_update = -edge_weights.grad
-            for i, (_, to_node, _) in enumerate(sorted_edges):
-                weight_update[i] /= (self.G.get_node_utility(to_node) + 1.0)
+            weight_update = -edge_weights.grad * self.learning_rate
+            print(f"weight_update: {weight_update}")
+            # for i, (_, to_node, _) in enumerate(sorted_edges):
+            #     weight_update[i] /= (self.G.get_node_utility(to_node) + 1.0)
             self.G.set_edge_weights([
                 (from_node, to_node, new_weight) for (from_node, to_node, _), new_weight
                 in zip(sorted_edges, edge_weights + weight_update)
@@ -156,14 +164,14 @@ class DynamicNeuralNetwork:
 
         # Get nodes with at most average in-degree
         non_input_nodes = self.hidden_nodes + self.output_nodes
-        in_degrees = [self.G.get_in_degree(node) for node in non_input_nodes]
+        in_degrees = [self.G.get_in_degree(node_id) for node_id in non_input_nodes]
         avg_in_degree = np.mean(in_degrees)
         below_avg_nodes = [
-            node for node in non_input_nodes if self.G.get_in_degree(node) <= avg_in_degree
+            node_id for node_id in non_input_nodes if self.G.get_in_degree(node_id) <= avg_in_degree
         ]
 
         # Update edge growth intents
-        max_hunger_node = max(below_avg_nodes, key=lambda node: self.G.get_node_hunger(node))
+        max_hunger_node = max(below_avg_nodes, key=lambda node_id: self.G.get_node_hunger(node_id))
         if max_hunger_node:
             in_neighbors = set(self.G.get_in_neighbors(max_hunger_node))
             out_neighbors = set(self.G.get_out_neighbors(max_hunger_node))
@@ -199,35 +207,32 @@ class DynamicNeuralNetwork:
         max_rank = 0
         ranks = {}
 
-        input_nodes_set = set(self.input_nodes)
-        output_nodes_set = set(self.output_nodes)
-
         sorted_nodes = self.G.get_topological_order()
         sorted_edges = self.G.get_sorted_edges()
 
         # Compute ranks for each node
-        for node in self.input_nodes:
-            ranks[node] = 0
+        for node_id in self.input_nodes:
+            ranks[node_id] = 0
         
-        for node in sorted_nodes:
-            if node in input_nodes_set:
+        for node_id in sorted_nodes:
+            if node_id in self.input_nodes_set:
                 continue
-            in_neighbors = self.G.get_in_neighbors(node)
+            in_neighbors = self.G.get_in_neighbors(node_id)
             if len(in_neighbors) > 0:
-                ranks[node] = max(ranks[in_n] for in_n in in_neighbors) + 1
-                max_rank = max(max_rank, ranks[node])
-            elif node not in output_nodes_set:
+                ranks[node_id] = max(ranks[in_n] for in_n in in_neighbors) + 1
+                max_rank = max(max_rank, ranks[node_id])
+            elif node_id not in self.output_nodes_set:
                 raise RuntimeError("Non-output nodes should have at least one in-neighbor")
                 
-        for node in self.output_nodes:
-            ranks[node] = max_rank + 1
+        for node_id in self.output_nodes:
+            ranks[node_id] = max_rank + 1
 
         # Group nodes by rank
         rank_to_nodes = {}
-        for node, rank in ranks.items():
+        for node_id, rank in ranks.items():
             if rank not in rank_to_nodes:
                 rank_to_nodes[rank] = []
-            rank_to_nodes[rank].append(node)
+            rank_to_nodes[rank].append(node_id)
         
         # Define positions for each node
         pos = {}
@@ -237,27 +242,27 @@ class DynamicNeuralNetwork:
                 y = np.linspace(0, 1, len(nodes))
             else:
                 y = np.linspace(0, 1, len(nodes)+2)[1:-1]
-            for i, node in enumerate(nodes):
-                pos[node] = (x, y[i])
+            for i, node_id in enumerate(nodes):
+                pos[node_id] = (x, y[i])
 
         # Define colors for each node
         colors = {}
-        for node in sorted_nodes:
-            if node in input_nodes_set:
-                colors[node] = 'blue'
-            elif node in output_nodes_set:
-                colors[node] = 'red'
+        for node_id in sorted_nodes:
+            if node_id in self.input_nodes_set:
+                colors[node_id] = 'blue'
+            elif node_id in self.output_nodes_set:
+                colors[node_id] = 'red'
             else:
-                colors[node] = 'green'
+                colors[node_id] = 'green'
         
         # Draw nodes
-        for node, (x, y) in pos.items():
-            ax.scatter(x, y, color=colors[node], s=100)
+        for node_id, (x, y) in pos.items():
+            ax.scatter(x, y, color=colors[node_id], s=100)
             # Add topological index as label for each node
-            topo_index = self.G.get_topological_index(node)
-            hunger = self.G.get_node_hunger(node)
-            utility = self.G.get_node_utility(node)
-            ax.text(x, y, f"{topo_index}\nid: {node}\nU: {utility:.2f}\nH: {hunger:.2f}", 
+            topo_index = self.G.get_topological_index(node_id)
+            hunger = self.G.get_node_hunger(node_id)
+            utility = self.G.get_node_utility(node_id)
+            ax.text(x, y, f"{topo_index}\nid: {node_id}\nU: {utility:.2f}\nH: {hunger:.2f}", 
                 ha='center', va='center', fontsize=8, 
                 bbox=dict(facecolor='white', alpha=0.7, boxstyle='round,pad=0.2'))
 
