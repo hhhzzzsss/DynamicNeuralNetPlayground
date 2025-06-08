@@ -3,7 +3,7 @@ import numpy as np
 from dnn_libs.agraph import AcyclicGraph
 
 class DynamicNeuralNetwork:
-    def __init__(self, input_size, output_size, utility_decay=0.01, hunger_decay=0.05, learning_rate=1):
+    def __init__(self, input_size, output_size, utility_decay=0.01, hunger_decay=0.05, learning_rate=0.1):
         self.input_size = input_size
         self.output_size = output_size
         self.utility_decay = utility_decay
@@ -34,7 +34,7 @@ class DynamicNeuralNetwork:
         self.hidden_nodes.append(node_id)
         return node_id
     def add_edge(self, from_node, to_node, sign=0.0):
-        self.G.add_edge(from_node, to_node, 0.001*sign)
+        self.G.add_edge(from_node, to_node, 0.01*sign)
     def add_double_edge(self, from_node, to_node, sign=0.0):
         hidden_node = self.add_hidden_node()
         self.G.add_edge(from_node, hidden_node, 1.0)
@@ -94,8 +94,8 @@ class DynamicNeuralNetwork:
         input_tensor = torch.stack([
             pth_nodes[self.G.get_topological_index(node_id)] for node_id in self.input_nodes
         ], dim=1)
-        print(input_tensor)
-        print(f"output tensor:\n{output_tensor}")
+        # print(input_tensor)
+        # print(f"output tensor:\n{output_tensor}")
 
         # Compute loss
         criterion = torch.nn.CrossEntropyLoss()
@@ -145,8 +145,6 @@ class DynamicNeuralNetwork:
         # Update hunger
         for node_id in self.hidden_nodes + self.output_nodes:
             current_hunger = self.G.get_node_hunger(node_id)
-            # print(f"{pth_nodes[self.G.get_topological_index(node_id)]}")
-            print(f"{node_id} -> {self.G.get_out_neighbors(node_id)}")
             current_hunger += torch.mean(torch.abs(
                 pth_nodes[self.G.get_topological_index(node_id)].grad
             ))
@@ -155,7 +153,7 @@ class DynamicNeuralNetwork:
 
         # Update edge weights
         if len(sorted_edges) > 0:
-            weight_update = -edge_weights.grad * self.learning_rate
+            weight_update = -edge_weights.grad/torch.linalg.norm(edge_weights.grad) * self.learning_rate
             # for i, (_, to_node, _) in enumerate(sorted_edges):
             #     weight_update[i] /= (self.G.get_node_utility(to_node) + 1.0)
             self.G.set_edge_weights([
@@ -174,6 +172,7 @@ class DynamicNeuralNetwork:
         # Update edge growth intents
         max_hunger_node = max(below_avg_nodes, key=lambda node_id: self.G.get_node_hunger(node_id))
         if max_hunger_node:
+            print(f"Max hunger node: {max_hunger_node} with hunger {self.G.get_node_hunger(max_hunger_node)}")
             in_neighbors = set(self.G.get_in_neighbors(max_hunger_node))
             out_neighbors = set(self.G.get_out_neighbors(max_hunger_node))
             successors = self.G.get_successors(max_hunger_node)
@@ -197,10 +196,10 @@ class DynamicNeuralNetwork:
         to_node = largest_intent_edge[1]
         sign = 1 if intent_value >= 0 else -1
         if self.G.get_node_utility(to_node) > 1:
-            print(f"Growing double edge from {from_node} to {to_node}")
+            print(f"Growing double edge from {from_node} to {to_node} with intent {intent_value}")
             self.add_double_edge(from_node, to_node, sign)
         else:
-            print(f"Growing single edge from {from_node} to {to_node}")
+            print(f"Growing single edge from {from_node} to {to_node} with intent {intent_value}")
             self.add_edge(from_node, to_node, sign)
         self.edge_growth_intents.clear()
 
