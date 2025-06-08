@@ -6,10 +6,10 @@ from lib.dnn import DynamicNeuralNetwork
 
 def train_xor():
     # Create a DynamicNeuralNetwork instance
-    dnn = DynamicNeuralNetwork(input_size=2, output_size=2)
+    dnn = DynamicNeuralNetwork(input_size=3, output_size=2)
 
     # Define the XOR dataset
-    X = np.array([[0, 0], [0, 1], [1, 0], [1, 1]], dtype=np.float32)
+    X = np.array([[0, 0, 1], [0, 1, 1], [1, 0, 1], [1, 1, 1]], dtype=np.float32)
     y = np.array([0, 1, 1, 0], dtype=np.int64)
 
     # Convert to PyTorch tensors
